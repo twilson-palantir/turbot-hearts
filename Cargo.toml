@@ -1,0 +1,7 @@
+[package]
+name = "turbot-hearts"
+version = "0.1.0"
+authors = ["Tim Wilson <twilson@palantir.com>"]
+
+[dependencies]
+bitflags = "1.0"
