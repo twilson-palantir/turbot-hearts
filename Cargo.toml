@@ -5,3 +5,4 @@ authors = ["Tim Wilson <twilson@palantir.com>"]
 
 [dependencies]
 bitflags = "1.0"
+rand = "0.4"

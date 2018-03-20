@@ -3,8 +3,38 @@
 #[macro_use]
 extern crate bitflags;
 
+extern crate rand;
+
+use rand::{thread_rng, Rng};
 use std::fmt::{self, Write};
-use std::mem;
+
+const RANKS: [char; 13] = [
+    '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'
+];
+const SUITS: [char; 4] = ['C', 'D', 'H', 'S'];
+
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+struct Card(u8);
+
+impl Card {
+    const TWO_CLUBS: Card = Card(0);
+
+    fn suit(self) -> Cards {
+        Cards::from_bits(0x1fff << (16 * (self.0 / 16))).unwrap()
+    }
+
+    fn as_cards(self) -> Cards {
+        Cards::from_bits(1 << (self.0)).unwrap()
+    }
+}
+
+impl fmt::Display for Card {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_char(RANKS[(self.0 % 13) as usize])?;
+        f.write_char(SUITS[(self.0 / 13) as usize])?;
+        Ok(())
+    }
+}
 
 bitflags! {
     struct Cards: u64 {
@@ -24,13 +54,12 @@ bitflags! {
 }
 
 impl Cards {
-    const RANKS: [char; 13] = [
-        '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'
-    ];
-    const SUITS: [char; 4] = ['C', 'D', 'H', 'S'];
-
     fn len(self) -> u32 {
         self.bits.count_ones()
+    }
+
+    fn max(self) -> Card {
+        Card(63 - self.bits.leading_zeros() as u8)
     }
 
     fn suit(self) -> Self {
@@ -42,18 +71,14 @@ impl Cards {
         Cards::empty()
     }
 
-    fn max(self) -> Self {
-        Cards::from_bits(1 << (63 - self.bits.leading_zeros())).unwrap()
-    }
-
     fn parse(s: &str) -> Self {
         let mut bits = 0;
         for card in s.split(' ') {
             let mut chars = card.chars();
             let suit = chars.next_back().unwrap();
-            let suit = Cards::SUITS.iter().position(|&s| s == suit).unwrap();
+            let suit = SUITS.iter().position(|&s| s == suit).unwrap();
             for rank in chars {
-                let rank = Cards::RANKS.iter().position(|&r| r == rank).unwrap();
+                let rank = RANKS.iter().position(|&r| r == rank).unwrap();
                 bits |= 1 << (16 * suit + rank);
             }
         }
@@ -73,14 +98,42 @@ impl fmt::Display for Cards {
                 }
                 while suit != 0 {
                     let next = 63 - suit.leading_zeros();
-                    f.write_char(Self::RANKS[next as usize])?;
+                    f.write_char(RANKS[next as usize])?;
                     suit -= 1 << next;
                 }
-                f.write_char(Self::SUITS[i as usize])?;
+                f.write_char(SUITS[i as usize])?;
                 first = false;
             }
         }
         Ok(())
+    }
+}
+
+impl std::ops::BitOr<Card> for Cards {
+    type Output = Self;
+
+    fn bitor(self, rhs: Card) -> Self {
+        self | rhs.as_cards()
+    }
+}
+
+impl std::ops::BitOrAssign<Card> for Cards {
+    fn bitor_assign(&mut self, rhs: Card) {
+        self.bitor_assign(rhs.as_cards());
+    }
+}
+
+impl std::ops::Sub<Card> for Cards {
+    type Output = Self;
+
+    fn sub(self, rhs: Card) -> Self {
+        self - rhs.as_cards()
+    }
+}
+
+impl std::ops::SubAssign<Card> for Cards {
+    fn sub_assign(&mut self, rhs: Card) {
+        self.sub_assign(rhs.as_cards());
     }
 }
 
@@ -99,15 +152,29 @@ struct FullState {
     trick: Cards,
 }
 
-fn trick_winner(trick: Cards, lead: Cards) -> Cards {
+fn deal_hands() -> [Cards; 4] {
+    let mut deck = [Card(0); 52];
+    for i in 0..52 {
+        deck[i] = Card((16 * (i / 13) + (i % 13)) as u8);
+    }
+    thread_rng().shuffle(&mut deck);
+    let mut hands = [Cards::empty(); 4];
+    for i in 0..52 {
+        hands[i / 13] |= deck[i];
+    }
+    hands
+}
+
+fn trick_winner(trick: Cards, lead: Card) -> Card {
     (trick & lead.suit()).max()
 }
 
-fn is_nined(trick: Cards, lead: Cards) -> bool {
+fn is_nined(trick: Cards, lead: Card) -> bool {
     !(Cards::NINES & trick & lead.suit()).is_empty()
 }
 
-fn holder_of(hand: [Cards; 4], card: Cards) -> usize {
+fn holder_of(hand: [Cards; 4], card: Card) -> usize {
+    let card = card.as_cards();
     match (
         hand[0].intersects(card),
         hand[1].intersects(card),
@@ -122,7 +189,7 @@ fn holder_of(hand: [Cards; 4], card: Cards) -> usize {
 }
 
 fn opt_hand(hand: [Cards; 4]) -> [Cards; 4] {
-    let player = holder_of(hand, Cards::TWO_CLUBS);
+    let player = holder_of(hand, Card::TWO_CLUBS);
     let mut opt_charged = Cards::empty();
     let mut opt_won = opt_post_charge(player, hand, opt_charged);
     for i in 0..4 {
@@ -155,7 +222,7 @@ fn opt_post_charge(player: usize, hand: [Cards; 4], charged: Cards) -> [Cards; 4
         ],
         charged,
         Cards::empty(),
-        Cards::empty(),
+        None,
         Cards::empty(),
     )
 }
@@ -166,22 +233,9 @@ fn opt_inner(
     won: [Cards; 4],
     charged: Cards,
     led_suits: Cards,
-    lead: Cards,
+    lead: Option<Card>,
     trick: Cards,
 ) -> [Cards; 4] {
-    //println!(
-    //    "opt_inner player={}, hand[0]={}, hand[1]={}, hand[2]={}, hand[3]={}, won[0]={}, won[1]={}, won[2]={}, won[3]={}, lead={}, trick={}, charged={}",
-    //    player, hand[0], hand[1], hand[2], hand[3], won[0], won[1], won[2], won[3], lead, trick, charged,
-    //);
-    //let in_hand = hand[0].len() + hand[1].len() + hand[2].len() + hand[3].len();
-    //let done = won[0].len() + won[1].len() + won[2].len() + won[3].len();
-    //if in_hand + done != 52 || in_hand % 4 != 0 {
-    //    println!(
-    //    "opt_inner player={}, hand[0]={}, hand[1]={}, hand[2]={}, hand[3]={}, won[0]={}, won[1]={}, won[2]={}, won[3]={}, lead={}, trick={}, charged={}",
-    //    player, hand[0], hand[1], hand[2], hand[3], won[0], won[1], won[2], won[3], lead, trick, charged,
-    //);
-    //}
-
     let played = won[0] | won[1] | won[2] | won[3];
     if played == Cards::all() {
         return won;
@@ -197,7 +251,7 @@ fn opt_inner(
     let lost = if trick == Cards::empty() {
         Cards::empty()
     } else {
-        trick - trick_winner(trick, lead)
+        trick - trick_winner(trick, lead.unwrap()).as_cards()
     };
     let mut plays = distinct_plays(plays, played | lost, charged);
 
@@ -214,12 +268,12 @@ fn opt_inner(
         plays -= play;
 
         let finishes_trick = trick_size == 7
-            || (trick_size == 3 && (played.len() == 48 || !is_nined(play | trick, lead)));
+            || (trick_size == 3 && (played.len() == 48 || !is_nined(trick | play, lead.unwrap())));
 
         let next_lead = if trick_size == 0 {
-            play
+            Some(play)
         } else if finishes_trick {
-            Cards::empty()
+            None
         } else {
             lead
         };
@@ -242,14 +296,14 @@ fn opt_inner(
         };
 
         let next_player = if finishes_trick {
-            let winning_card = trick_winner(trick | play, lead);
+            let winning_card = trick_winner(trick | play, lead.unwrap());
             holder_of(hand, winning_card)
         } else {
             (player + 1) % 4
         };
 
         let next_led_suits = if finishes_trick {
-            led_suits | lead.suit()
+            led_suits | lead.unwrap().suit()
         } else {
             led_suits
         };
@@ -274,20 +328,6 @@ fn opt_inner(
             opt_won = resulting_won;
         }
     }
-    if opt_won[0].len() + opt_won[1].len() + opt_won[2].len() + opt_won[3].len() != 52 {
-        println!(
-            "{}: {}, {}, {}, {}",
-            played.len(),
-            opt_won[0],
-            opt_won[1],
-            opt_won[2],
-            opt_won[3]
-        );
-        println!(
-        "opt_inner player={}, hand[0]={}, hand[1]={}, hand[2]={}, hand[3]={}, won[0]={}, won[1]={}, won[2]={}, won[3]={}, lead={}, trick={}, charged={}",
-        player, hand[0], hand[1], hand[2], hand[3], won[0], won[1], won[2], won[3], lead, trick, charged,
-    );
-    }
     opt_won
 }
 
@@ -295,11 +335,11 @@ fn legal_plays(
     hand: Cards,
     charged: Cards,
     led_suits: Cards,
-    lead: Cards,
+    lead: Option<Card>,
     hearts_broken: bool,
 ) -> Cards {
     let mut plays = hand;
-    let suit = lead.suit();
+    let suit = lead.map(Card::suit).unwrap_or(Cards::empty());
 
     // If this is the first trick
     if led_suits.is_empty() {
@@ -439,12 +479,13 @@ fn score(won: Cards, charged: Cards) -> i32 {
 }
 
 fn main() {
-    let c1 = Cards::parse("AJT5S J63H 96D A953C");
-    let c2 = Cards::parse("9732S T92H K7D KT74C");
-    let c3 = Cards::parse("KQ6S A5H JT542D Q82C");
-    let c4 = Cards::parse("84S KQ874H AQ83D J6C");
-    let opt = opt_hand([c1, c2, c3, c4]);
-    println!("{}, {}, {}, {}", opt[0], opt[1], opt[2], opt[3]);
+    //let c1 = Cards::parse("AJT5S J63H 96D A953C");
+    //let c2 = Cards::parse("9732S T92H K7D KT74C");
+    //let c3 = Cards::parse("KQ6S A5H JT542D Q82C");
+    //let c4 = Cards::parse("84S KQ874H AQ83D J6C");
+    //let opt = opt_hand([c1, c2, c3, c4]);
+    //println!("{}, {}, {}, {}", opt[0], opt[1], opt[2], opt[3]);
+    println!("{}", Card(49).suit());
 }
 
 #[cfg(test)]
